@@ -142,7 +142,7 @@ if __name__ == "__main__":
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
     agent = Agent(device, state_dim, action_dim)
-    Num_round = 200
+    Num_round = 1500
     episode_length = 1000
     episode_rewards = []
     for episode in range(Num_round):    # 模型训练次数
