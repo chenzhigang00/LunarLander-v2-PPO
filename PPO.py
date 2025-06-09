@@ -4,7 +4,6 @@ import numpy as np
 import os
 import random
 from torch import nn
-from torch.utils.tensorboard import SummaryWriter
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def seed_everything(seed=42):
@@ -56,7 +55,7 @@ class Memory:
         self.rewards.append(reward)
         self.terminated.append(terminated)
     def append_logprob(self, old_logprob):
-        self.old_logprob.append(old_logprob)
+        self.old_logprob.append(old_logprob)   # 记录采样时策略的动作概率值
 
     def Observation(self):
         return torch.tensor(np.array(self.observations), dtype=torch.float32).to(device)
@@ -89,7 +88,7 @@ class Agent:
         prob = self.policy.action(observation)
         dist = torch.distributions.Categorical(prob)
         logprob = dist.log_prob(action).squeeze()  
-        value = self.policy.critic(observation).squeeze()  
+        value = self.policy.critic(observation).squeeze()    # 计算状态价值
         return logprob, value
         
     def update(self, k_epoch=5):
@@ -99,7 +98,7 @@ class Agent:
         def discount(self, rewards: torch.Tensor, terminated: torch.Tensor) -> torch.Tensor:
             discount_reward = []
             r_tmp = 0
-            for i in range(rewards.shape[0]-1, -1, -1):
+            for i in range(rewards.shape[0]-1, -1, -1):   # 从后往前计算奖励，增量式计算
                 if terminated[i] == 1:
                     r_tmp = 0
                 r_tmp = rewards[i] + self.gamma * r_tmp
@@ -113,9 +112,9 @@ class Agent:
         mean_loss = 0
         for _ in range(k_epoch):
             logprob, value = self.evaluate(self.memory.Observation(), self.memory.Action())
-            advantage = discount_reward - value
+            advantage = discount_reward - value   # 基线技术
             advantage = normalize(advantage)
-            ratio = torch.exp(logprob - old_logprob.detach())    # PPO重要性采样比
+            ratio = torch.exp(logprob - old_logprob.detach())    # 利用当前动作策略和采样时的旧策略值，计算PPO重要性采样比
             surr1 = ratio * advantage   # 策略梯度项
             surr2 = torch.clamp(ratio, 1-self.episilon, 1+self.episilon) * advantage   # PPO clip 梯度裁剪，使策略变化更加稳定
             loss = -torch.min(surr1, surr2) + nn.MSELoss()(value, discount_reward)   # PPO损失函数：策略损失+价值损失
@@ -125,7 +124,6 @@ class Agent:
             loss.backward()
             self.optimizer.step()
             mean_loss += loss.item()
-            print("\rEpoch: {}, Loss: {}".format(_, loss.item()), end="")
             
         self.memory.clear()
         return mean_loss/k_epoch
@@ -137,54 +135,34 @@ class Agent:
         torch.save(self.policy.state_dict(), model_name)
 
 if __name__ == "__main__":
-    test = True
-    if not test:
-        env = gym.make("LunarLander-v3", continuous = False, gravity = -10.0, seed= 42,
-               enable_wind = False, wind_power=15.0, turbulence_power=1.5, render_mode=None)  # LunarLander-v3 with Gymnasium
-        seed_everything()
-        state_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.n
-        agent = Agent(device, state_dim, action_dim)
-        writer = SummaryWriter("./logs/PPO-same-optim")
-        Num_episode = 200
-        episode_length = 1000
-        for episode in range(Num_episode):
-            print("\nEpisode: {}".format(episode))
-            total_reward = 0
-            rounds = 1
-            observation, info = env.reset()
-            for t in range(episode_length):
-                action = agent.act(torch.tensor(observation)[None,:].to(device))
-                new_observation, reward, terminated, truncated, info = env.step(action)
-                agent.append(observation, action, reward, terminated)
-                total_reward += reward
-                observation = new_observation
-                if terminated:
-                    observation, info = env.reset()
-                    rounds += 1
-            agent.save("model.pth")
-            print("\nEpisode: {}, Mean_Reward: {}, Rounds: {}".format(episode, total_reward/rounds, rounds))
-            loss = agent.update()
-            writer.add_scalar("Mean_Reward", total_reward/rounds, episode)
-            writer.add_scalar("loss", loss, episode)
-        env.close()
+    env = gym.make("LunarLander-v3", continuous = False, gravity = -10.0,
+            enable_wind = False, wind_power=15.0, turbulence_power=1.5, render_mode=None)  # LunarLander-v3 with Gymnasium
+    env.reset(seed=42)
+    seed_everything()
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+    agent = Agent(device, state_dim, action_dim)
+    Num_round = 200
+    episode_length = 1000
+    episode_rewards = []
+    for episode in range(Num_round):    # 模型训练次数
+        total_reward = 0
+        observation, info = env.reset()
+        for t in range(episode_length):  # 采集数据
+            action = agent.act(torch.tensor(observation)[None,:].to(device))
+            new_observation, reward, terminated, truncated, info = env.step(action)
+            agent.append(observation, action, reward, terminated)
+            total_reward += reward
+            observation = new_observation
+            if terminated:
+                observation, info = env.reset()
+                break            
+        episode_rewards.append(total_reward)
+        if episode % 10 == 0:
+            avg = np.mean(episode_rewards[-10:])
+            print(f"Episode {episode}, Avg Reward: {avg:.2f}")
+        agent.update()   # 模型更新
 
-    #test
-    env = gym.make("LunarLander-v2", render_mode="human")
-    agent = Agent(device)
-    agent.policy.load_state_dict(torch.load("best_model.pth"))
-    observation, info = env.reset()
-    total_rewards = 0
-    while True:
-        # env.render()
-        action = agent.act(torch.tensor(observation)[None,:].to(device))
-        observation, reward, terminated, truncated, info = env.step(action)
-        total_rewards += reward
-        if terminated or truncated:
-            observation, info = env.reset()
-            print("Total Reward: {}".format(total_rewards))
-            total_rewards = 0
+    agent.save("model.pth")
+    np.save("rewards.npy", episode_rewards)
     env.close()
-
-
-
