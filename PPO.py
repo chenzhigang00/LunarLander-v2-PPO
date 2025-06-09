@@ -6,7 +6,7 @@ import random
 from torch import nn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def seed_everything(seed=42):
+def seed_everything(seed=39):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -137,7 +137,7 @@ class Agent:
 if __name__ == "__main__":
     env = gym.make("LunarLander-v3", continuous = False, gravity = -10.0,
             enable_wind = False, wind_power=15.0, turbulence_power=1.5, render_mode=None)  # LunarLander-v3 with Gymnasium
-    env.reset(seed=42)
+    env.reset(seed=39)
     seed_everything()
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
@@ -163,6 +163,6 @@ if __name__ == "__main__":
             print(f"Episode {episode}, Avg Reward: {avg:.2f}")
         agent.update()   # 模型更新
 
-    agent.save("model.pth")
-    np.save("rewards.npy", episode_rewards)
+    agent.save("model_3.pth")
+    np.save("rewards_3.npy", episode_rewards)
     env.close()
