@@ -7,18 +7,28 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# PPO是确定性策略梯度法
+# actor-critic 结构，有两个网络
 class Policy(nn.Module):
     def __init__(self, d_observation, d_action, hid):
         super(Policy, self).__init__()
-        self.action = nn.Sequential(
+        self.action = nn.Sequential(    # 策略网络，对策略建模，策略梯度法的体现
             nn.Linear(d_observation, hid),
             nn.ReLU(),
             nn.Linear(hid, 64),
             nn.ReLU(),
             nn.Linear(64, d_action),
-            nn.Softmax(dim=1),
+            nn.Softmax(dim=-1),
         )
-        self.critic = nn.Sequential(
+        self.critic = nn.Sequential(    # 价值网络，用神经网络对状态价值函数 V建模，在基线技术中用于表示 TD目标
             nn.Linear(d_observation, hid),
             nn.ReLU(),
             nn.Linear(hid, 64),
@@ -26,13 +36,14 @@ class Policy(nn.Module):
             nn.Linear(64, 1),
         )
 
+# 经验回放
 class Memory:
     def __init__(self):
-        self.observations:list = []
-        self.actions:list = []
-        self.rewards:list = []
-        self.terminated:list = []
-        self.old_logprob:list = []
+        self.observations:list = []  # 状态信息
+        self.actions:list = []       
+        self.rewards:list = []        
+        self.terminated:list = []    # 标志是否结束
+        self.old_logprob:list = []   # 策略梯度法中的策略概率logP
     def clear(self):
         del self.observations[:]
         del self.actions[:]
@@ -59,31 +70,28 @@ class Memory:
         return torch.tensor(self.old_logprob, dtype=torch.float32).to(device)
 
 class Agent:
-    def __init__(self, device, gamma=0.99, episilon=0.2):
+    def __init__(self, device, s_d, a_d, gamma=0.99, episilon=0.2):
         self.gamma = gamma
-        self.policy = Policy(8, 4, 128).to(device)
+        self.policy = Policy(s_d, a_d, 128).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=1e-3)
-        # self.optimizer = torch.optim.Adam(self.policy.action.parameters(), lr=1e-3)
-        # self.critic_optimizer = torch.optim.Adam(self.policy.critic.parameters(), lr=1e-3)
         self.memory = Memory()
         self.episilon = episilon
 
-    def act(self, observation: torch.Tensor) -> torch.Tensor:
-        prob = self.policy.action(observation)
+    def act(self, observation: torch.Tensor) -> torch.Tensor:   # 根据当前观测选择动作，并记录动作概率对数（用于策略梯度更新）
+        prob = self.policy.action(observation)    # 计算策略动作概率值
         dist = torch.distributions.Categorical(prob)
-        action = dist.sample()
-        logprob = dist.log_prob(action).squeeze()  # [1]
+        action = dist.sample()   # 选择动作
+        logprob = dist.log_prob(action).squeeze()  
         self.memory.append_logprob(logprob)
         return action.item()
 
-    def evaluate(self, observation: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor]:
+    def evaluate(self, observation: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor]:   # 评估一批观测和动作
         prob = self.policy.action(observation)
         dist = torch.distributions.Categorical(prob)
-        logprob = dist.log_prob(action).squeeze()  # [episode_length]
-        value = self.policy.critic(observation).squeeze()  # [episode_length]
+        logprob = dist.log_prob(action).squeeze()  
+        value = self.policy.critic(observation).squeeze()  
         return logprob, value
         
-
     def update(self, k_epoch=5):
         def normalize(x: torch.Tensor, episilon=1e-5) -> torch.Tensor:
             return (x - x.mean())/(x.std()+episilon)
@@ -107,24 +115,16 @@ class Agent:
             logprob, value = self.evaluate(self.memory.Observation(), self.memory.Action())
             advantage = discount_reward - value
             advantage = normalize(advantage)
-            ratio = torch.exp(logprob - old_logprob.detach())
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1-self.episilon, 1+self.episilon) * advantage
-            loss = -torch.min(surr1, surr2) + nn.MSELoss()(value, discount_reward)
-            # loss = -advantage * logprob + nn.MSELoss()(value, discount_reward)
-            # loss = -torch.min(surr1, surr2)
+            ratio = torch.exp(logprob - old_logprob.detach())    # PPO重要性采样比
+            surr1 = ratio * advantage   # 策略梯度项
+            surr2 = torch.clamp(ratio, 1-self.episilon, 1+self.episilon) * advantage   # PPO clip 梯度裁剪，使策略变化更加稳定
+            loss = -torch.min(surr1, surr2) + nn.MSELoss()(value, discount_reward)   # PPO损失函数：策略损失+价值损失
             loss = loss.mean()
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             mean_loss += loss.item()
-
-            # critic_loss = nn.MSELoss()(value, discount_reward)
-            # self.critic_optimizer.zero_grad()
-            # critic_loss.backward()
-            # self.critic_optimizer.step()
-
             print("\rEpoch: {}, Loss: {}".format(_, loss.item()), end="")
             
         self.memory.clear()
@@ -139,8 +139,12 @@ class Agent:
 if __name__ == "__main__":
     test = True
     if not test:
-        env = gym.make("LunarLander-v2", render_mode="rgb_array")
-        agent = Agent(device)
+        env = gym.make("LunarLander-v3", continuous = False, gravity = -10.0, seed= 42,
+               enable_wind = False, wind_power=15.0, turbulence_power=1.5, render_mode=None)  # LunarLander-v3 with Gymnasium
+        seed_everything()
+        state_dim = env.observation_space.shape[0]
+        action_dim = env.action_space.n
+        agent = Agent(device, state_dim, action_dim)
         writer = SummaryWriter("./logs/PPO-same-optim")
         Num_episode = 200
         episode_length = 1000
